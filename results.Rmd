@@ -1,0 +1,655 @@
+---
+title: "Green Lab Experiment Analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE
+)
+
+library(tidyverse)
+library(jsonlite)
+library(purrr)
+library(TOSTER)
+```
+
+# 1. Load or Build Aggregated Dataset
+
+```{r load-or-build}
+cache_file <- "agg.rds"
+
+if (file.exists(cache_file)) {
+  message("Loading cached dataset...")
+  agg <- readRDS(cache_file)
+} else {
+  message("Building dataset from raw files...")
+
+  base_dir <- "~/Green-Lab-Course-Work-Group-5/Assignment_3/baseline/results"
+  runs <- list.dirs(base_dir, recursive = FALSE)
+
+  agg <- map_dfr(runs, function(d) {
+    energy_file <- file.path(d, "energy.csv")
+    meta_file   <- file.path(d, "metadata.json")
+
+    if (!file.exists(energy_file)) return(NULL)
+
+    df <- suppressMessages(read_csv(energy_file, show_col_types = FALSE))
+
+    cpu_col <- names(df)[grepl("CPU_ENERGY", names(df))]
+    if (length(cpu_col) == 0) return(NULL)
+
+    start_e <- df[[cpu_col]][1]
+    end_e   <- df[[cpu_col]][nrow(df)]
+    total_e <- end_e - start_e
+
+    freq_cols <- grep("^CPU_FREQUENCY", names(df), value = TRUE)
+    avg_freq <- if (length(freq_cols) > 0) {
+      df %>% select(all_of(freq_cols)) %>% rowMeans(na.rm = TRUE) %>% mean(na.rm = TRUE)
+    } else NA_real_
+
+    usage_cols <- grep("^CPU_USAGE", names(df), value = TRUE)
+    avg_cpu <- if (length(usage_cols) > 0) {
+      df %>% select(all_of(usage_cols)) %>% rowMeans(na.rm = TRUE) %>% mean(na.rm = TRUE)
+    } else NA_real_
+
+    peak_memory <- if ("USED_MEMORY" %in% names(df)) {
+      max(df$USED_MEMORY, na.rm = TRUE)
+    } else NA_real_
+
+    meta <- if (file.exists(meta_file)) fromJSON(meta_file) else list()
+
+    tibble(
+      run_dir = basename(d),
+      run_num = meta$run_num %||% NA,
+      subject = meta$subject %||% NA,
+      gc = meta$gc %||% NA,
+      workload = meta$workload %||% NA,
+      jdk = meta$jdk %||% NA,
+      replication = meta$replication %||% NA,
+      total_energy = total_e,
+      avg_freq_mhz = avg_freq,
+      avg_cpu_pct = avg_cpu,
+      peak_memory = peak_memory
+    )
+  })
+
+  saveRDS(agg, cache_file)
+  message("Aggregation complete and saved to disk.")
+}
+```
+
+# 2. Overview of Dataset
+
+```{r glimpse}
+glimpse(agg)
+```
+
+```{r summary-table}
+agg %>%
+  group_by(subject, gc, workload, jdk) %>%
+  summarise(
+    mean_energy = mean(total_energy, na.rm = TRUE),
+    sd_energy   = sd(total_energy, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  head(20)
+```
+
+# 3. Visualizations
+
+## Energy by GC
+
+```{r}
+ggplot(agg, aes(gc, total_energy)) +
+  geom_boxplot() +
+  labs(title = "Energy Consumption by Garbage Collector",
+       x = "Garbage Collector",
+       y = "Energy (J)")
+```
+
+## Energy by Workload
+
+```{r}
+ggplot(agg, aes(workload, total_energy)) +
+  geom_boxplot() +
+  labs(title = "Energy by Workload",
+       x = "Workload",
+       y = "Energy (J)")
+```
+
+## Energy by Benchmark Subject
+
+```{r}
+ggplot(agg, aes(subject, total_energy)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Energy by Benchmark Subject",
+       x = "Subject",
+       y = "Energy (J)")
+```
+
+# 4. Statistical Tests
+
+## Kruskal-Wallis
+
+```{r}
+kruskal.test(total_energy ~ gc, data = agg)
+```
+
+## Pairwise Wilcoxon
+
+```{r}
+pairwise.wilcox.test(agg$total_energy, agg$gc, p.adjust.method = "bonferroni")
+```
+
+## Energy differences by JDK
+
+```{r}
+kruskal.test(total_energy ~ jdk, data = agg)
+```
+
+# 5. Save Clean CSV
+
+```{r}
+write_csv(agg, "agg_clean.csv")
+```
+
+```{r}
+gc_results <- agg %>%
+  group_by(gc) %>%
+  summarise(
+    mean_energy = mean(total_energy),
+    median_energy = median(total_energy),
+    sd_energy = sd(total_energy),
+    n = n()
+  ) %>%
+  arrange(mean_energy)
+
+gc_results
+```
+```{r}
+cor.test(agg$total_energy, agg$runtime_sec, method="pearson")
+```
+```{r}
+se <- sd(agg$total_energy)
+
+TOSTtwo.raw(
+  m1 = mean(agg$total_energy[agg$jdk == "openjdk"]),
+  m2 = mean(agg$total_energy[agg$jdk == "oracle"]),
+  sd1 = sd(agg$total_energy[agg$jdk == "openjdk"]),
+  sd2 = sd(agg$total_energy[agg$jdk == "oracle"]),
+  n1 = sum(agg$jdk == "openjdk"),
+  n2 = sum(agg$jdk == "oracle"),
+  low_eqbound = -0.05 * mean(agg$total_energy),
+  high_eqbound =  0.05 * mean(agg$total_energy)
+)
+```
+
+```{r}
+m <- aov(total_energy ~ jdk, data = agg)
+anova_tbl <- summary(m)
+anova_tbl
+ss_effect <- anova_tbl[[1]]$`Sum Sq`[1]
+ss_total  <- sum(anova_tbl[[1]]$`Sum Sq`)
+eta2 <- ss_effect / ss_total
+eta2
+```
+
+```{r}
+subject_sd <- agg %>% 
+  group_by(subject) %>% 
+  summarise(sd_energy = sd(total_energy)) %>% 
+  arrange(sd_energy)
+
+subject_sd
+```
+
+```{r}
+lm1 <- lm(total_energy ~ subject + gc + workload + jdk, data = agg)
+residual_sd <- sd(residuals(lm1))
+residual_sd
+```
+
+```{r}
+by(agg$total_energy, agg$gc, shapiro.test)
+```
+
+```{r}
+library(car)
+leveneTest(total_energy ~ gc, data = agg)
+```
+
+```{r}
+agg$power <- agg$total_energy / agg$runtime_sec
+service_subjects <- c("PetClinic","TodoApp","ANDIE")
+
+agg$subject_type <- ifelse(agg$subject %in% service_subjects,
+                           "service", "benchmark")
+agg %>% 
+  group_by(subject_type) %>%      # <-- you must define benchmark vs service
+  summarise(
+    median_power = median(power),
+    min = min(power),
+    max = max(power)
+  )
+
+agg <- agg %>%
+  mutate(subject_type = ifelse(subject %in% c("PetClinic", "TodoApp", "ANDIE"),
+                               "service", "benchmark"))
+```
+
+```{r}
+agg <- agg %>%
+  mutate(subject_type = ifelse(subject %in% c("PetClinic", "TodoApp", "ANDIE"),
+                               "service", "benchmark"))
+
+# Compute instantaneous power
+agg <- agg %>%
+  mutate(power_w = total_energy / runtime_sec)
+
+# Order workloads
+agg$workload <- factor(agg$workload, levels = c("Light", "Medium", "Heavy"))
+
+# Plot: grouped boxplot
+power_cons <- ggplot(agg, aes(x = workload, y = power_w, fill = subject_type)) +
+  geom_boxplot(outlier.alpha = 0.15, width = 0.7) +
+  scale_fill_manual(values = c("benchmark" = "steelblue", "service" = "orange")) +
+  labs(
+    title = "Instantaneous Power by Workload and Application Type",
+    x = "Workload Level",
+    y = "Instantaneous Power (W)",
+    fill = "Application Type"
+  ) +
+  theme_minimal(base_size = 14)
+
+ggsave("analysis_outputs/power_cons.png", power_cons, width = 8, height = 4)
+```
+
+```{r}
+gc_summary <- agg %>%
+  group_by(gc) %>%
+  summarise(
+    N = n(),
+    Energy_J = round(mean(total_energy, na.rm = TRUE), 1),
+    Runtime_s = round(mean(runtime_sec, na.rm = TRUE), 1),
+    Power_W = round(mean(total_energy / runtime_sec, na.rm = TRUE)/10, 2)
+  )
+
+gc_summary
+```
+```{r compute-summary-stats, message=FALSE, warning=FALSE}
+library(tidyverse)
+
+# Basic global summaries
+energy_min  <- min(agg$total_energy, na.rm = TRUE)
+energy_max  <- max(agg$total_energy, na.rm = TRUE)
+energy_mean <- mean(agg$total_energy, na.rm = TRUE)
+energy_sd   <- sd(agg$total_energy, na.rm = TRUE)
+
+# Between-subject SD (by subject)
+subject_sd <- agg %>%
+  group_by(subject) %>%
+  summarise(sd_energy = sd(total_energy, na.rm = TRUE))
+
+subject_sd_min <- min(subject_sd$sd_energy, na.rm = TRUE)
+subject_sd_max <- max(subject_sd$sd_energy, na.rm = TRUE)
+
+# GC-level descriptive table (replace your Table 1)
+gc_table <- agg %>%
+  group_by(gc) %>%
+  summarise(
+    N = n(),
+    mean_energy = mean(total_energy, na.rm = TRUE),
+    mean_runtime = mean(runtime_sec, na.rm = TRUE),
+    mean_power   = mean_energy/mean_runtime  # W
+  )
+
+gc_table
+
+# Print summary statistics
+cat("Global Energy Statistics:\n")
+cat(sprintf("Min Energy: %.2f J\n", energy_min))
+cat(sprintf("Max Energy: %.2f J\n", energy_max))
+cat(sprintf("Mean Energy: %.2f J\n", energy_mean))
+cat(sprintf("SD Energy: %.2f J\n", energy_sd))
+cat(sprintf("Between-Subject SD Min: %.2f J\n", subject_sd_min))
+cat(sprintf("Between-Subject SD Max: %.2f J\n", subject_sd_max))
+```
+
+```{r}
+# fit lmer model with subject random intercept
+library(lme4)
+# if energy is skewed, use log transform per your pipeline
+m <- lmer(total_energy ~ gc * workload + (1|subject), data = agg)
+vc <- as.data.frame(lme4::VarCorr(m))
+vc
+# compute proportion
+subject_var <- vc$vcov[vc$grp=="subject"]
+resid_var <- vc$vcov[vc$grp=="Residual"]
+prop_subject <- subject_var / (subject_var + resid_var)
+cat(sprintf("subject variance = %.2f; residual variance = %.2f; proportion subject = %.2f", subject_var, resid_var, prop_subject))
+```
+
+```{r}
+library(emmeans)
+emm <- emmeans(m, ~ gc)
+pairs(emm, adjust="tukey") %>% as.data.frame()
+```
+
+```{r}
+agg %>%
+ group_by(workload) %>%
+ summarise(median_power = median(total_energy / runtime_sec, na.rm=TRUE),
+           min_power = min(total_energy / runtime_sec, na.rm=TRUE),
+           max_power = max(total_energy / runtime_sec, na.rm=TRUE))
+```
+
+```{r}
+
+# Compute mean & SE for each JDK × GC combination
+table7 <- agg %>%
+  group_by(jdk, gc) %>%
+  summarise(
+    N = n(),
+    mean_energy = mean(total_energy, na.rm = TRUE),
+    SE = sd(total_energy, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  ) %>%
+  group_by(jdk) %>%
+  mutate(rank = rank(mean_energy, ties.method = "first")) %>%
+  ungroup()
+
+table7
+```
+
+```{r}
+
+plot_data <- agg %>%
+  group_by(jdk, gc) %>%
+  summarise(
+    mean_energy = mean(total_energy, na.rm = TRUE),
+    SE = sd(total_energy, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+plot <- ggplot(plot_data, aes(x = gc, y = mean_energy, color = jdk, group = jdk)) +
+  geom_line(size = 1) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = mean_energy - SE,
+                    ymax = mean_energy + SE),
+                width = 0.1) +
+  labs(
+    title = "GC × JDK Interaction: Energy Efficiency",
+    x = "GC Strategy",
+    y = "Mean Energy (J)"
+  ) +
+  theme_minimal(base_size = 12)
+ggsave("analysis_outputs/jdk_gc_interaction.png", plot, width = 8, height = 5)
+```
+
+```{r}
+interaction_model <- lm(total_energy ~ gc * jdk, data = agg)
+
+anova_interaction <- anova(interaction_model)
+anova_interaction
+```
+
+```{r}
+# R code to generate Figures 8–16 and save to analysis_outputs
+
+library(lme4)
+library(ggplot2)
+library(dplyr)
+library(tibble)
+library(purrr)
+library(jsonlite)
+library(readr)
+library(scales)
+
+dir.create("analysis_outputs", showWarnings = FALSE)
+
+# --- Figure 8: Variance Explained ---
+m_var <- lmer(total_energy ~ gc + workload + (1|subject), data = agg)
+vc <- as.data.frame(VarCorr(m_var)) %>%
+  transmute(component = grp, variance = vcov)
+resid_var <- tibble(component = "residual", variance = attr(VarCorr(m_var), "sc")^2)
+vc <- bind_rows(vc, resid_var) %>% mutate(prop = variance / sum(variance))
+
+p8 <- ggplot(vc, aes(x = component, y = prop)) +
+  geom_col(fill = "steelblue") +
+  geom_text(aes(label = percent(prop, accuracy = 0.1)), vjust = -0.5) +
+  labs(title = "Variance Explained by Model Components", y = "Proportion", x = "Component")
+ggsave("analysis_outputs/figure8_variance.png", p8, width=7, height=5)
+
+# --- Figure 9: Energy by Workload ---
+agg_work <- agg %>% group_by(workload) %>% summarise(mean_energy = mean(total_energy), SE = sd(total_energy)/sqrt(n()))
+p9 <- ggplot(agg_work, aes(workload, mean_energy)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = mean_energy - SE, ymax = mean_energy + SE), width = 0.15) +
+  labs(title = "Average Energy by Workload", y = "Energy (J)")
+ggsave("analysis_outputs/figure9_workload.png", p9, width=7, height=5)
+
+# --- Figure 10: GC × Workload Interaction ---
+agg_gcw <- agg %>% group_by(gc, workload) %>% summarise(mean_energy = mean(total_energy), SE = sd(total_energy)/sqrt(n()), .groups="drop")
+p10 <- ggplot(agg_gcw, aes(workload, mean_energy, color = gc, group = gc)) +
+  geom_line(size = 1) + geom_point(size = 2) +
+  geom_errorbar(aes(ymin = mean_energy - SE, ymax = mean_energy + SE), width = 0.10) +
+  labs(title = "GC × Workload Interaction", y = "Energy (J)")
+ggsave("analysis_outputs/figure10_gc_workload.png", p10, width=7, height=5)
+
+# --- Figure 11: Heatmap ---
+p11 <- ggplot(agg_gcw, aes(gc, workload, fill = mean_energy)) +
+  geom_tile() + scale_fill_gradient(low = "darkgreen", high = "white") +
+  geom_text(aes(label = round(mean_energy)), color = "black") +
+  labs(title = "Mean Energy by GC × Workload", fill = "Energy (J)")
+ggsave("analysis_outputs/figure11_heatmap.png", p11, width=7, height=5)
+
+# --- Figure 12: EDP ---
+agg_edp <- agg %>% mutate(EDP = total_energy * runtime_sec) %>% group_by(gc, workload) %>% summarise(mean_EDP = mean(EDP), SE = sd(EDP)/sqrt(n()), .groups="drop")
+p12 <- ggplot(agg_edp, aes(workload, mean_EDP, color = gc, group = gc)) +
+  geom_line(size = 1) + geom_point(size = 2) +
+  geom_errorbar(aes(ymin = mean_EDP - SE, ymax = mean_EDP + SE), width = 0.10) +
+  labs(title = "EDP by GC × Workload", y = "EDP (J·s)")
+ggsave("analysis_outputs/figure12_edp.png", p12, width=7, height=5)
+
+# --- Figure 13: Energy–Runtime Scatter ---
+p13 <- ggplot(agg, aes(runtime_sec, total_energy, color = gc, shape = workload)) +
+  geom_point(alpha = 0.7) + labs(title = "Energy–Performance Tradeoff", x = "Runtime (s)", y = "Energy (J)")
+ggsave("analysis_outputs/figure13_scatter.png", p13, width=7, height=5)
+
+# --- Figure 15: GC × JDK Boxplots ---
+p15 <- ggplot(agg, aes(gc, total_energy, fill = gc)) +
+  geom_boxplot(outlier.alpha = 0.3) + facet_wrap(~jdk) +
+  labs(title = "Energy Distribution by GC and JDK", y = "Energy (J)")
+ggsave("analysis_outputs/figure15_gc_jdk_box.png", p15, width=7, height=5)
+
+# --- Figure 16: Mean Energy by GC × JDK ---
+agg_gcj <- agg %>% group_by(jdk, gc) %>% summarise(mean_energy = mean(total_energy), SE = sd(total_energy)/sqrt(n()), .groups="drop")
+p16 <- ggplot(agg_gcj, aes(gc, mean_energy, color = jdk, group = jdk)) +
+  geom_point(size = 3) + geom_line(size = 1) +
+  geom_errorbar(aes(ymin = mean_energy - SE, ymax = mean_energy + SE), width = 0.15) +
+  labs(title = "Energy by GC × JDK", y = "Energy (J)")
+ggsave("analysis_outputs/figure16_gc_jdk_means.png", p16, width=7, height=5)
+```
+
+```{r}
+# ============================================================
+# FIGURE 8 — Variance explained (no variancePartition needed)
+# ============================================================
+
+library(lme4)
+
+# Mixed model
+m_var <- lmer(total_energy ~ gc + workload + subject_type + (1 | subject),
+              data = agg, REML = TRUE)
+
+# Extract variances
+var_subject <- as.data.frame(VarCorr(m_var))$vcov[1]
+var_resid   <- sigma(m_var)^2
+anova_m     <- anova(m_var)
+
+var_gc        <- anova_m["gc", "Sum Sq"]
+var_workload  <- anova_m["workload", "Sum Sq"]
+var_subjtype  <- anova_m["subject_type", "Sum Sq"]
+
+var_total <- var_gc + var_workload + var_subjtype + var_subject + var_resid
+
+percent <- 100 * c(
+  gc = var_gc,
+  workload = var_workload,
+  subject_type = var_subjtype,
+  subject = var_subject,
+  residual = var_resid
+) / var_total
+
+print(percent)
+
+
+# ============================================================
+# FIGURE 9 — Workload means, SE, ANOVA, and post-hoc
+# ============================================================
+
+library(dplyr)
+library(emmeans)
+
+workload_summary <- agg %>%
+  group_by(workload) %>%
+  summarise(
+    N = n(),
+    mean_energy = mean(total_energy, na.rm = TRUE),
+    SE = sd(total_energy, na.rm = TRUE) / sqrt(n())
+  )
+
+print(workload_summary)
+
+# ANOVA for workload effect
+m_workload <- lm(total_energy ~ workload, data = agg)
+anova_workload <- anova(m_workload)
+print(anova_workload)
+
+# Post-hoc comparisons
+posthoc_workload <- emmeans(m_workload, pairwise ~ workload)
+print(posthoc_workload)
+
+
+# ============================================================
+# FIGURE 10 — GC × Workload interaction
+# ============================================================
+
+m_gc_x_workload <- lm(total_energy ~ gc * workload, data = agg)
+anova_gc_x_workload <- anova(m_gc_x_workload)
+print(anova_gc_x_workload)
+
+interaction_means <- agg %>%
+  group_by(gc, workload) %>%
+  summarise(
+    mean_energy = mean(total_energy, na.rm = TRUE),
+    SE = sd(total_energy, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+print(interaction_means)
+
+
+# ============================================================
+# FIGURE 11 — Heatmap numbers
+# ============================================================
+
+heatmap_table <- agg %>%
+  group_by(gc, workload) %>%
+  summarise(
+    mean_energy = mean(total_energy, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  tidyr::pivot_wider(names_from = workload, values_from = mean_energy)
+
+print(heatmap_table)
+
+
+# ============================================================
+# FIGURE 12 — Energy–Delay Product (EDP)
+# ============================================================
+
+agg$EDP <- agg$total_energy * agg$runtime_sec
+
+edp_summary <- agg %>%
+  group_by(gc, workload) %>%
+  summarise(
+    mean_EDP = mean(EDP, na.rm = TRUE),
+    SE = sd(EDP, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+print(edp_summary)
+
+m_edp <- lm(EDP ~ gc * workload, data = agg)
+anova_edp <- anova(m_edp)
+print(anova_edp)
+
+
+# ============================================================
+# FIGURE 13 — Correlation Energy vs Runtime (overall + per GC)
+# ============================================================
+
+cor_total <- cor.test(agg$total_energy, agg$runtime_sec)
+print(cor_total)
+
+cor_by_gc <- agg %>%
+  group_by(gc) %>%
+  summarise(cor = cor(total_energy, runtime_sec), .groups = "drop")
+
+print(cor_by_gc)
+
+
+# ============================================================
+# FIGURE 15 — Energy distributions by JDK (boxplots)
+# ============================================================
+
+distribution_table <- agg %>%
+  group_by(jdk, gc) %>%
+  summarise(
+    N = n(),
+    median_energy = median(total_energy),
+    IQR = IQR(total_energy),
+    min = min(total_energy),
+    max = max(total_energy),
+    .groups = "drop"
+  )
+
+print(distribution_table)
+
+
+# ============================================================
+# FIGURE 16 — GC × JDK Means & SE
+# ============================================================
+
+gc_jdk_summary <- agg %>%
+  group_by(jdk, gc) %>%
+  summarise(
+    N = n(),
+    mean_energy = mean(total_energy),
+    SE = sd(total_energy) / sqrt(n()),
+    .groups = "drop"
+  ) %>%
+  arrange(jdk, gc)
+
+print(gc_jdk_summary)
+
+m_gc_jdk <- lm(total_energy ~ gc * jdk, data = agg)
+anova_gc_jdk <- anova(m_gc_jdk)
+print(anova_gc_jdk)
+```
+
+```{r}
+# Mean energy per run (J)
+mean_energy <- mean(agg$total_energy, na.rm = TRUE)
+
+# Mean runtime per run (seconds)
+mean_runtime <- mean(agg$runtime_sec, na.rm = TRUE)
+
+mean_energy
+mean_runtime
+```
