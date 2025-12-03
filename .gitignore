@@ -7,3 +7,4 @@ experiment-runner/
 *.class
 *.log
 jars/*.jar
+Assignment_3/baseline/results

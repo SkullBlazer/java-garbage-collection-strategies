@@ -1,0 +1,61 @@
+spd5118-i2c-3-51
+Adapter: SMBus PIIX4 adapter port 0 at 0b00
+temp1:        +45.0°C  (low  =  +0.0°C, high = +55.0°C)
+                       (crit low =  +0.0°C, crit = +85.0°C)
+
+amdgpu-pci-0600
+Adapter: PCI adapter
+vddgfx:      765.00 mV 
+vddnb:         1.10 V  
+edge:         +54.0°C  
+PPT:          25.22 W  
+
+ucsi_source_psy_USBC000:001-isa-0000
+Adapter: ISA adapter
+in0:           0.00 V  (min =  +0.00 V, max =  +0.00 V)
+curr1:         0.00 A  (max =  +0.00 A)
+
+nvme-pci-0200
+Adapter: PCI adapter
+Composite:    +28.9°C  (low  = -40.1°C, high = +83.8°C)
+                       (crit = +87.8°C)
+Sensor 1:     +31.9°C  (low  = -273.1°C, high = +65261.8°C)
+Sensor 2:     +28.9°C  (low  = -273.1°C, high = +65261.8°C)
+
+BAT1-acpi-0
+Adapter: ACPI interface
+in0:          17.45 V  
+curr1:         0.00 A  
+
+asus-isa-0000
+Adapter: ISA adapter
+cpu_fan:     2000 RPM
+gpu_fan:     2000 RPM
+
+spd5118-i2c-3-50
+Adapter: SMBus PIIX4 adapter port 0 at 0b00
+temp1:        +44.0°C  (low  =  +0.0°C, high = +55.0°C)
+                       (crit low =  +0.0°C, crit = +85.0°C)
+
+ucsi_source_psy_USBC000:002-isa-0000
+Adapter: ISA adapter
+in0:           0.00 V  (min =  +0.00 V, max =  +0.00 V)
+curr1:         0.00 A  (max =  +0.00 A)
+
+k10temp-pci-00c3
+Adapter: PCI adapter
+Tctl:         +56.9°C  
+Tccd1:        +50.1°C  
+Tccd2:        +50.2°C  
+
+nvme-pci-0500
+Adapter: PCI adapter
+Composite:    +24.9°C  (low  = -40.1°C, high = +83.8°C)
+                       (crit = +87.8°C)
+Sensor 1:     +39.9°C  (low  = -273.1°C, high = +65261.8°C)
+Sensor 2:     +24.9°C  (low  = -273.1°C, high = +65261.8°C)
+
+acpitz-acpi-0
+Adapter: ACPI interface
+temp1:        +56.0°C  
+
